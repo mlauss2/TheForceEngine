@@ -61,7 +61,7 @@ if(ENABLE_TFE)
 	add_executable(tfe)
 	set_target_properties(tfe PROPERTIES OUTPUT_NAME "theforceengine")
 
-	if(LINUX)
+	if(LINUX OR APPLE)
 		find_package(PkgConfig REQUIRED)
 		find_package(Threads REQUIRED)
 		find_package(SDL2 2.0.20 REQUIRED)
