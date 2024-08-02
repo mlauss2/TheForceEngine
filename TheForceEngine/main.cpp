@@ -34,6 +34,10 @@
 #include <sys/types.h>
 #include <sys/timeb.h>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 #if ENABLE_EDITOR == 1
 #include <TFE_Editor/editor.h>
 #endif
@@ -56,7 +60,7 @@
 #define PROGRAM_ERROR   1
 #define PROGRAM_SUCCESS 0
 
-#ifndef _DEBUG
+#if (!defined(_DEBUG) || defined(NDEBUG)) && !defined(__EMSCRIPTEN__)
 #define INSTALL_CRASH_HANDLER 1
 #else
 #define INSTALL_CRASH_HANDLER 0
@@ -65,25 +69,38 @@
 using namespace TFE_Input;
 using namespace TFE_A11Y;
 
-static bool s_loop  = true;
-static bool s_nullAudioDevice = false;
-static f32  s_refreshRate  = 0;
-static s32  s_displayIndex = 0;
-static u32  s_baseWindowWidth  = 1280;
-static u32  s_baseWindowHeight = 720;
-static u32  s_displayWidth  = s_baseWindowWidth;
-static u32  s_displayHeight = s_baseWindowHeight;
-static u32  s_monitorWidth  = 1280;
-static u32  s_monitorHeight = 720;
-static char s_screenshotTime[TFE_MAX_PATH];
-static s32  s_startupGame = -1;
-static IGame* s_curGame = nullptr;
-static const char* s_loadRequestFilename = nullptr;
+struct TFEMainContext
+{
+	bool loop;
+	AppState curState;
+	u32 frame;
+	bool soundPaused;
+	f32  refreshRate;
+	s32  displayIndex;
+	u32  baseWindowWidth;
+	u32  baseWindowHeight;
+	u32  displayWidth;
+	u32  displayHeight;
+	u32  monitorWidth;
+	u32  monitorHeight;
+	char screenshotTime[TFE_MAX_PATH];
+	s32  startupGame;
+	IGame* curGame;
+	const char* loadRequestFilename;
+	bool showPerf;
+	bool relativeMode;
+	TFE_Settings_Graphics* graphics;
+	int argc;
+	char **argv;
+	bool nullAudioDevice;
+};
 
-void parseOption(const char* name, const std::vector<const char*>& values, bool longName);
-bool validatePath();
+static TFEMainContext s_mainContext;
 
-void handleEvent(SDL_Event& Event)
+static void parseOption(const char* name, const std::vector<const char*>& values, bool longName);
+static bool validatePath();
+
+static void handleEvent(SDL_Event& Event)
 {
 	TFE_Ui::setUiInput(&Event);
 	TFE_Settings_Window* windowSettings = TFE_Settings::getWindowSettings();
@@ -93,7 +110,7 @@ void handleEvent(SDL_Event& Event)
 		case SDL_QUIT:
 		{
 			TFE_System::logWrite(LOG_MSG, "Main", "App Quit");
-			s_loop = false;
+			s_mainContext.loop = false;
 		} break;
 		case SDL_WINDOWEVENT:
 		{
@@ -161,7 +178,7 @@ void handleEvent(SDL_Event& Event)
 					TFE_Paths::appendPath(TFE_PathType::PATH_USER_DOCUMENTS, "Screenshots/", screenshotDir);
 										
 					char screenshotPath[TFE_MAX_PATH];
-					sprintf(screenshotPath, "%stfe_screenshot_%s_%" PRIu64 ".png", screenshotDir, s_screenshotTime, _screenshotIndex);
+					sprintf(screenshotPath, "%stfe_screenshot_%s_%" PRIu64 ".png", screenshotDir, s_mainContext.screenshotTime, _screenshotIndex);
 					_screenshotIndex++;
 
 					TFE_RenderBackend::queueScreenshot(screenshotPath);
@@ -177,7 +194,7 @@ void handleEvent(SDL_Event& Event)
 						TFE_Paths::appendPath(TFE_PathType::PATH_USER_DOCUMENTS, "Screenshots/", screenshotDir);
 
 						char gifPath[TFE_MAX_PATH];
-						sprintf(gifPath, "%stfe_gif_%s_%" PRIu64 ".gif", screenshotDir, s_screenshotTime, _gifIndex);
+						sprintf(gifPath, "%stfe_gif_%s_%" PRIu64 ".gif", screenshotDir, s_mainContext.screenshotTime, _gifIndex);
 						_gifIndex++;
 
 						TFE_RenderBackend::startGifRecording(gifPath);
@@ -244,25 +261,25 @@ void handleEvent(SDL_Event& Event)
 	}
 }
 
-bool sdlInit()
+static bool sdlInit()
 {
 	const int code = SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO);
 	if (code != 0) { return false; }
 
 	TFE_Settings_Window* windowSettings = TFE_Settings::getWindowSettings();
 	bool fullscreen    = windowSettings->fullscreen || TFE_Settings::getTempSettings()->forceFullscreen;
-	s_displayWidth     = windowSettings->width;
-	s_displayHeight    = windowSettings->height;
-	s_baseWindowWidth  = windowSettings->baseWidth;
-	s_baseWindowHeight = windowSettings->baseHeight;
+	s_mainContext.displayWidth     = windowSettings->width;
+	s_mainContext.displayHeight    = windowSettings->height;
+	s_mainContext.baseWindowWidth  = windowSettings->baseWidth;
+	s_mainContext.baseWindowHeight = windowSettings->baseHeight;
 
 	// Get the displays and their bounds.
-	s_displayIndex = TFE_RenderBackend::getDisplayIndex(windowSettings->x, windowSettings->y);
+	s_mainContext.displayIndex = TFE_RenderBackend::getDisplayIndex(windowSettings->x, windowSettings->y);
 	// Reset the display if the window is out of bounds.
-	if (s_displayIndex < 0)
+	if (s_mainContext.displayIndex < 0)
 	{
 		MonitorInfo mInfo;
-		s_displayIndex = 0;
+		s_mainContext.displayIndex = 0;
 		TFE_RenderBackend::getDisplayMonitorInfo(0, &mInfo);
 
 		windowSettings->x = mInfo.x;
@@ -273,30 +290,30 @@ bool sdlInit()
 		windowSettings->baseHeight = windowSettings->height;
 		TFE_Settings::writeToDisk();
 
-		s_displayWidth     = windowSettings->width;
-		s_displayHeight    = windowSettings->height;
-		s_baseWindowWidth  = windowSettings->baseWidth;
-		s_baseWindowHeight = windowSettings->baseHeight;
+		s_mainContext.displayWidth     = windowSettings->width;
+		s_mainContext.displayHeight    = windowSettings->height;
+		s_mainContext.baseWindowWidth  = windowSettings->baseWidth;
+		s_mainContext.baseWindowHeight = windowSettings->baseHeight;
 	}
 
 	// Determine the display mode settings based on the desktop.
 	SDL_DisplayMode mode = {};
-	SDL_GetDesktopDisplayMode(s_displayIndex, &mode);
-	s_refreshRate = (f32)mode.refresh_rate;
+	SDL_GetDesktopDisplayMode(s_mainContext.displayIndex, &mode);
+	s_mainContext.refreshRate = (f32)mode.refresh_rate;
 
 	if (fullscreen)
 	{
-		s_displayWidth  = mode.w;
-		s_displayHeight = mode.h;
+		s_mainContext.displayWidth  = mode.w;
+		s_mainContext.displayHeight = mode.h;
 	}
 	else
 	{
-		s_displayWidth  = std::min(s_displayWidth,  (u32)mode.w);
-		s_displayHeight = std::min(s_displayHeight, (u32)mode.h);
+		s_mainContext.displayWidth  = std::min(s_mainContext.displayWidth,  (u32)mode.w);
+		s_mainContext.displayHeight = std::min(s_mainContext.displayHeight, (u32)mode.h);
 	}
 
-	s_monitorWidth  = mode.w;
-	s_monitorHeight = mode.h;
+	s_mainContext.monitorWidth  = mode.w;
+	s_mainContext.monitorHeight = mode.h;
 
 #ifdef SDL_HINT_APP_NAME  // SDL 2.0.18+
 	SDL_SetHint(SDL_HINT_APP_NAME, "The Force Engine");
@@ -305,10 +322,7 @@ bool sdlInit()
 	return true;
 }
 
-static AppState s_curState = APP_STATE_UNINIT;
-static bool s_soundPaused = false;
-
-void setAppState(AppState newState, int argc, char* argv[])
+static void setAppState(AppState newState, int argc, char* argv[])
 {
 	const TFE_Settings_Graphics* config = TFE_Settings::getGraphicsSettings();
 
@@ -340,30 +354,30 @@ void setAppState(AppState newState, int argc, char* argv[])
 	case APP_STATE_LOAD:
 	{
 		bool pathIsValid = validatePath();
-		if (pathIsValid && s_loadRequestFilename)
+		if (pathIsValid && s_mainContext.loadRequestFilename)
 		{
 			newState = APP_STATE_GAME;
 			TFE_FrontEndUI::setAppState(APP_STATE_GAME);
 
 			TFE_Game* gameInfo = TFE_Settings::getGame();
-			if (s_curGame)
+			if (s_mainContext.curGame)
 			{
-				freeGame(s_curGame);
-				s_curGame = nullptr;
+				freeGame(s_mainContext.curGame);
+				s_mainContext.curGame = nullptr;
 			}
-			s_soundPaused = false;
-			s_curGame = createGame(gameInfo->id);
-			TFE_SaveSystem::setCurrentGame(s_curGame);
-			if (!s_curGame)
+			s_mainContext.soundPaused = false;
+			s_mainContext.curGame = createGame(gameInfo->id);
+			TFE_SaveSystem::setCurrentGame(s_mainContext.curGame);
+			if (!s_mainContext.curGame)
 			{
 				TFE_System::logWrite(LOG_ERROR, "AppMain", "Cannot create game '%s'.", gameInfo->game);
 				newState = APP_STATE_CANNOT_RUN;
 			}
-			else if (!TFE_SaveSystem::loadGame(s_loadRequestFilename))
+			else if (!TFE_SaveSystem::loadGame(s_mainContext.loadRequestFilename))
 			{
 				TFE_System::logWrite(LOG_ERROR, "AppMain", "Cannot run game '%s'.", gameInfo->game);
-				freeGame(s_curGame);
-				s_curGame = nullptr;
+				freeGame(s_mainContext.curGame);
+				s_mainContext.curGame = nullptr;
 				newState = APP_STATE_CANNOT_RUN;
 			}
 			else
@@ -377,34 +391,34 @@ void setAppState(AppState newState, int argc, char* argv[])
 		}
 		else
 		{
-			newState = s_curState;
+			newState = s_mainContext.curState;
 		}
-		s_loadRequestFilename = nullptr;
+		s_mainContext.loadRequestFilename = nullptr;
 	} break;
 	case APP_STATE_GAME:
 		if (validatePath())
 		{
 			TFE_Game* gameInfo = TFE_Settings::getGame();
-			if (!s_curGame || gameInfo->id != s_curGame->id)
+			if (!s_mainContext.curGame || gameInfo->id != s_mainContext.curGame->id)
 			{
-				s_soundPaused = false;
-				if (s_curGame)
+				s_mainContext.soundPaused = false;
+				if (s_mainContext.curGame)
 				{
-					freeGame(s_curGame);
-					s_curGame = nullptr;
+					freeGame(s_mainContext.curGame);
+					s_mainContext.curGame = nullptr;
 				}
-				s_curGame = createGame(gameInfo->id);
-				TFE_SaveSystem::setCurrentGame(s_curGame);
-				if (!s_curGame)
+				s_mainContext.curGame = createGame(gameInfo->id);
+				TFE_SaveSystem::setCurrentGame(s_mainContext.curGame);
+				if (!s_mainContext.curGame)
 				{
 					TFE_System::logWrite(LOG_ERROR, "AppMain", "Cannot create game '%s'.", gameInfo->game);
 					newState = APP_STATE_CANNOT_RUN;
 				}
-				else if (!s_curGame->runGame(argc, (const char**)argv, nullptr))
+				else if (!s_mainContext.curGame->runGame(argc, (const char**)argv, nullptr))
 				{
 					TFE_System::logWrite(LOG_ERROR, "AppMain", "Cannot run game '%s'.", gameInfo->game);
-					freeGame(s_curGame);
-					s_curGame = nullptr;
+					freeGame(s_mainContext.curGame);
+					s_mainContext.curGame = nullptr;
 					newState = APP_STATE_CANNOT_RUN;
 				}
 				else
@@ -420,15 +434,15 @@ void setAppState(AppState newState, int argc, char* argv[])
 		break;
 	};
 
-	s_curState = newState;
+	s_mainContext.curState = newState;
 }
 
-bool systemMenuKeyCombo()
+static bool systemMenuKeyCombo()
 {
 	return TFE_System::systemUiRequestPosted() || (inputMapping_getActionState(IAS_SYSTEM_MENU) == STATE_PRESSED);
 }
 
-void parseCommandLine(s32 argc, char* argv[])
+static void parseCommandLine(s32 argc, char* argv[])
 {
 	if (argc < 1) { return; }
 
@@ -471,7 +485,7 @@ void parseCommandLine(s32 argc, char* argv[])
 	}
 }
 
-void generateScreenshotTime()
+static void generateScreenshotTime()
 {
 #ifdef _WIN32
 	__time64_t time;
@@ -479,35 +493,35 @@ void generateScreenshotTime()
 	const char* timeString = _ctime64(&time);
 	if (timeString)
 	{
-		strcpy(s_screenshotTime, timeString);
+		strcpy(s_mainContext.screenshotTime, timeString);
 	}
 
 #else
 	time_t tt = time(NULL);
-	memset(s_screenshotTime, 0, 1024);
-	strcpy(s_screenshotTime, ctime(&tt));
+	memset(s_mainContext.screenshotTime, 0, 1024);
+	strcpy(s_mainContext.screenshotTime, ctime(&tt));
 #endif
 	// Replace ':' with '_'
-	size_t len = strlen(s_screenshotTime);
+	size_t len = strlen(s_mainContext.screenshotTime);
 	for (size_t i = 0; i < len; i++)
 	{
-		if (s_screenshotTime[i] == ':')
+		if (s_mainContext.screenshotTime[i] == ':')
 		{
-			s_screenshotTime[i] = '_';
+			s_mainContext.screenshotTime[i] = '_';
 		}
-		else if (s_screenshotTime[i] == ' ')
+		else if (s_mainContext.screenshotTime[i] == ' ')
 		{
-			s_screenshotTime[i] = '-';
+			s_mainContext.screenshotTime[i] = '-';
 		}
-		if (s_screenshotTime[i] == '\n')
+		if (s_mainContext.screenshotTime[i] == '\n')
 		{
-			s_screenshotTime[i] = 0;
+			s_mainContext.screenshotTime[i] = 0;
 			break;
 		}
 	}
 }
 
-bool validatePath()
+static bool validatePath()
 {
 	if (!TFE_Paths::hasPath(PATH_SOURCE_DATA)) { return false; }
 
@@ -528,6 +542,268 @@ bool validatePath()
 		}
 	}
 	return TFE_Paths::hasPath(PATH_SOURCE_DATA);
+}
+
+static void deinit(void)
+{
+	if (s_mainContext.curGame)
+	{
+		freeGame(s_mainContext.curGame);
+		s_mainContext.curGame = nullptr;
+	}
+	s_mainContext.soundPaused = false;
+	game_destroy();
+	reticle_destroy();
+	inputMapping_shutdown();
+	
+	// Cleanup
+	TFE_FrontEndUI::shutdown();
+	TFE_Audio::shutdown();
+	TFE_MidiPlayer::destroy();
+	TFE_Image::shutdown();
+	TFE_Palette::freeAll();
+	TFE_RenderBackend::updateSettings();
+	TFE_Settings::shutdown();
+	TFE_Jedi::texturepacker_freeGlobal();
+	TFE_RenderBackend::destroy();
+	TFE_SaveSystem::destroy();
+	SDL_Quit();
+	
+#ifdef ENABLE_FORCE_SCRIPT
+	TFE_ForceScript::destroy();
+#endif
+	
+	TFE_System::logWrite(LOG_MSG, "Progam Flow", "The Force Engine Game Loop Ended.");
+	TFE_System::logClose();
+	TFE_System::freeMessages();
+}
+
+static void mainloop(void)
+{
+	if (!s_mainContext.loop || TFE_System::quitMessagePosted())
+	{
+		deinit();
+#ifdef __EMSCRIPTEN__
+		emscripten_cancel_main_loop();
+#else
+		exit(PROGRAM_SUCCESS);
+#endif
+	}
+
+
+	TFE_FRAME_BEGIN();
+	TFE_System::frameLimiter_begin();
+
+	bool enableRelative = TFE_Input::relativeModeEnabled();
+	if (enableRelative != s_mainContext.relativeMode)
+	{
+		s_mainContext.relativeMode = enableRelative;
+		SDL_SetRelativeMouseMode(s_mainContext.relativeMode ? SDL_TRUE : SDL_FALSE);
+	}
+
+	// System events
+	SDL_Event event;
+	while (SDL_PollEvent(&event)) { handleEvent(event); }
+
+	// Handle mouse state.
+	s32 mouseX, mouseY;
+	s32 mouseAbsX, mouseAbsY;
+	u32 state = SDL_GetRelativeMouseState(&mouseX, &mouseY);
+	SDL_GetMouseState(&mouseAbsX, &mouseAbsY);
+	TFE_Input::setRelativeMousePos(mouseX, mouseY);
+	TFE_Input::setMousePos(mouseAbsX, mouseAbsY);
+	inputMapping_updateInput();
+
+	// Can we save?
+	TFE_FrontEndUI::setCanSave(s_mainContext.curGame ? s_mainContext.curGame->canSave() : false);
+
+	// Update the System UI.
+	AppState appState = TFE_FrontEndUI::update();
+	s_mainContext.loadRequestFilename = TFE_SaveSystem::loadRequestFilename();
+	if (s_mainContext.loadRequestFilename)
+	{
+		appState = APP_STATE_LOAD;
+	}
+
+	if (appState == APP_STATE_QUIT)
+	{
+		s_mainContext.loop = false;
+	}
+	else if (appState != s_mainContext.curState)
+	{
+		if (appState == APP_STATE_EXIT_TO_MENU)	// Return to the menu from the game.
+		{
+			if (s_mainContext.curGame)
+			{
+				freeGame(s_mainContext.curGame);
+				s_mainContext.curGame = nullptr;
+			}
+			s_mainContext.soundPaused = false;
+			appState = APP_STATE_MENU;
+		}
+
+		char* selectedMod = TFE_FrontEndUI::getSelectedMod();
+		if (selectedMod && selectedMod[0] && appState == APP_STATE_GAME)
+		{
+			char* newArgs[16];
+			for (s32 i = 0; i < s_mainContext.argc && i < 15; i++)
+			{
+				newArgs[i] = s_mainContext.argv[i];
+			}
+			newArgs[s_mainContext.argc] = selectedMod;
+			setAppState(appState, s_mainContext.argc + 1, newArgs);
+		}
+		else
+		{
+			setAppState(appState, s_mainContext.argc, s_mainContext.argv);
+		}
+	}
+
+	if (TFE_A11Y::hasPendingFont()) { TFE_A11Y::loadPendingFont(); } // Can't load new fonts between TFE_Ui::begin() and TFE_Ui::render();
+	TFE_Ui::begin();
+	TFE_System::update();
+
+	// Update
+	if (TFE_FrontEndUI::uiControlsEnabled() && task_canRun())
+	{
+		if (TFE_FrontEndUI::isConsoleOpen() && !TFE_FrontEndUI::isConsoleAnimating() && TFE_Input::keyPressed(KEY_ESCAPE))
+		{
+			TFE_FrontEndUI::toggleConsole();
+			// "Eat" the key so it doesn't extend to the Escape menu.
+			TFE_Input::clearKeyPressed(KEY_ESCAPE);
+			inputMapping_clearKeyBinding(KEY_ESCAPE);
+			if (s_mainContext.curGame)
+			{
+					s_mainContext.curGame->pauseGame(false);
+					TFE_Input::enableRelativeMode(true);
+				}
+			}
+			else if (inputMapping_getActionState(IAS_CONSOLE) == STATE_PRESSED)
+			{
+				bool isOpening = TFE_FrontEndUI::toggleConsole();
+				if (s_mainContext.curGame)
+				{
+					s_mainContext.curGame->pauseGame(isOpening);
+					TFE_Input::enableRelativeMode(!isOpening);
+				}
+			}
+			else if (TFE_Input::keyPressed(KEY_F9) && TFE_Input::keyDown(KEY_LALT))
+			{
+				s_mainContext.showPerf = !s_mainContext.showPerf;
+			}
+			else if (TFE_Input::keyPressed(KEY_F10) && TFE_Input::keyDown(KEY_LALT))
+			{
+				TFE_FrontEndUI::toggleProfilerView();
+			}
+			
+			bool toggleSystemMenu = systemMenuKeyCombo();
+			if (TFE_FrontEndUI::isConfigMenuOpen() && (toggleSystemMenu || TFE_Input::keyPressed(KEY_ESCAPE)))
+			{
+				// "Eat" the escape key so it doesn't also open the Escape menu.
+				TFE_Input::clearKeyPressed(KEY_ESCAPE);
+				inputMapping_clearKeyBinding(KEY_ESCAPE);
+				
+				s_mainContext.curState = TFE_FrontEndUI::menuReturn();
+				
+				if ((s_mainContext.soundPaused || TFE_Settings::getSoundSettings()->disableSoundInMenus) && s_mainContext.curGame)
+				{
+					s_mainContext.curGame->pauseSound(false);
+					s_mainContext.soundPaused = false;
+				}
+			}
+			else if (toggleSystemMenu)
+			{
+				TFE_FrontEndUI::enableConfigMenu();
+				TFE_FrontEndUI::setMenuReturnState(s_mainContext.curState);
+				
+				if (TFE_Settings::getSoundSettings()->disableSoundInMenus && s_mainContext.curGame)
+				{
+					s_mainContext.curGame->pauseSound(true);
+					s_mainContext.soundPaused = true;
+				}
+			}
+			else if (s_mainContext.soundPaused && !TFE_FrontEndUI::isConfigMenuOpen())
+			{
+				if (s_mainContext.curGame)
+				{
+					s_mainContext.curGame->pauseSound(false);
+			}
+			s_mainContext.soundPaused = false;
+		}
+	}
+
+#ifdef ENABLE_FORCE_SCRIPT
+	TFE_ForceScript::update();
+#endif
+
+	const bool isConsoleOpen = TFE_FrontEndUI::isConsoleOpen();
+	bool endInputFrame = true;
+	if (s_mainContext.curState == APP_STATE_EDITOR)
+	{
+#if ENABLE_EDITOR == 1
+		if (TFE_Editor::update(isConsoleOpen))
+		{
+			TFE_FrontEndUI::setAppState(APP_STATE_MENU);
+		}
+#endif
+	}
+	else if (s_mainContext.curState == APP_STATE_GAME)
+	{
+		if (!s_mainContext.curGame)
+		{
+			s_mainContext.curState = APP_STATE_MENU;
+		}
+		else
+		{
+			TFE_SaveSystem::update();
+			s_mainContext.curGame->loopGame();
+			endInputFrame = TFE_Jedi::task_run() != 0;
+		}
+	}
+	else
+	{
+		TFE_RenderBackend::clearWindow();
+	}
+
+	bool drawFps = s_mainContext.curGame && s_mainContext.graphics->showFps;
+	if (s_mainContext.curGame) { drawFps = drawFps && (!s_mainContext.curGame->isPaused()); }
+
+	TFE_FrontEndUI::setCurrentGame(s_mainContext.curGame);
+	TFE_FrontEndUI::draw(s_mainContext.curState == APP_STATE_MENU || s_mainContext.curState == APP_STATE_NO_GAME_DATA || s_mainContext.curState == APP_STATE_SET_DEFAULTS,
+			     s_mainContext.curState == APP_STATE_NO_GAME_DATA, s_mainContext.curState == APP_STATE_SET_DEFAULTS, drawFps);
+
+	// Make sure the clear the no game data state if the data becomes valid.
+	if (TFE_FrontEndUI::isNoDataMessageSet() && validatePath())
+	{
+		TFE_FrontEndUI::clearNoDataState();
+	}
+
+	bool swap = s_mainContext.curState != APP_STATE_EDITOR && (s_mainContext.curState != APP_STATE_MENU || TFE_FrontEndUI::isConfigMenuOpen());
+#if ENABLE_EDITOR == 1
+	if (s_mainContext.curState == APP_STATE_EDITOR)
+	{
+		swap = TFE_Editor::render();
+	}
+#endif
+
+	// Blit the frame to the window and draw UI.
+	TFE_RenderBackend::swap(swap);
+
+	// Handle framerate limiter.
+	TFE_System::frameLimiter_end();
+
+	// Clear transitory input state.
+	if (endInputFrame)
+	{
+		TFE_Input::endFrame();
+		inputMapping_endFrame();
+	}
+	s_mainContext.frame++;
+
+	if (endInputFrame)
+	{
+		TFE_FRAME_END();
+	}
 }
 
 int main(int argc, char* argv[])
@@ -571,6 +847,29 @@ int main(int argc, char* argv[])
 		return PROGRAM_ERROR;
 	}
 
+	s_mainContext.loop = true;
+	s_mainContext.nullAudioDevice = false;
+	s_mainContext.refreshRate  = 0;
+	s_mainContext.displayIndex = 0;
+	s_mainContext.baseWindowWidth  = 1280;
+	s_mainContext.baseWindowHeight = 720;
+	s_mainContext.displayWidth  = 1280;
+	s_mainContext.displayHeight = 720;
+	s_mainContext.monitorWidth  = 1280;
+	s_mainContext.monitorHeight = 720;
+	memset(s_mainContext.screenshotTime, 0, TFE_MAX_PATH);
+	s_mainContext.startupGame = -1;
+	s_mainContext.curGame = nullptr;
+	s_mainContext.loadRequestFilename = nullptr;
+	s_mainContext.curState = APP_STATE_UNINIT;
+	s_mainContext.soundPaused = false;
+	s_mainContext.showPerf = false;
+	s_mainContext.relativeMode = false;
+	s_mainContext.frame = 0;
+	s_mainContext.graphics = nullptr;
+	s_mainContext.argc = argc;
+	s_mainContext.argv = argv;
+	
 	// Override settings with command line options.
 	parseCommandLine(argc, argv);
 
@@ -614,9 +913,8 @@ int main(int argc, char* argv[])
 		return PROGRAM_ERROR;
 	}
 	TFE_Settings_Window* windowSettings = TFE_Settings::getWindowSettings();
-	TFE_Settings_Graphics* graphics = TFE_Settings::getGraphicsSettings();
-	TFE_System::init(s_refreshRate, graphics->vsync, c_gitVersion);
-	
+	s_mainContext.graphics = TFE_Settings::getGraphicsSettings();
+	TFE_System::init(s_mainContext.refreshRate, s_mainContext.graphics->vsync, c_gitVersion);
 	// Setup the GPU Device and Window.
 	u32 windowFlags = 0;
 	if (windowSettings->fullscreen || TFE_Settings::getTempSettings()->forceFullscreen)
@@ -624,19 +922,19 @@ int main(int argc, char* argv[])
 		TFE_System::logWrite(LOG_MSG, "Display", "Fullscreen enabled.");
 		windowFlags |= WINFLAG_FULLSCREEN;
 	}
-	if (graphics->vsync) { TFE_System::logWrite(LOG_MSG, "Display", "Vertical Sync enabled."); windowFlags |= WINFLAG_VSYNC; }
+	if (s_mainContext.graphics->vsync) { TFE_System::logWrite(LOG_MSG, "Display", "Vertical Sync enabled."); windowFlags |= WINFLAG_VSYNC; }
 	
 	WindowState windowState =
 	{
 		"",
-		s_displayWidth,
-		s_displayHeight,
-		s_baseWindowWidth,
-		s_baseWindowHeight,
-		s_monitorWidth,
-		s_monitorHeight,
+		s_mainContext.displayWidth,
+		s_mainContext.displayHeight,
+		s_mainContext.baseWindowWidth,
+		s_mainContext.baseWindowHeight,
+		s_mainContext.monitorWidth,
+		s_mainContext.monitorHeight,
 		windowFlags,
-		s_refreshRate
+		s_mainContext.refreshRate
 	};
 	sprintf(windowState.name, "The Force Engine  %s", TFE_System::getVersionString());
 	if (!TFE_RenderBackend::init(windowState))
@@ -646,7 +944,7 @@ int main(int argc, char* argv[])
 		return PROGRAM_ERROR;
 	}
 	TFE_FrontEndUI::initConsole();
-	TFE_Audio::init(s_nullAudioDevice, TFE_Settings::getSoundSettings()->audioDevice);
+	TFE_Audio::init(s_mainContext.nullAudioDevice, TFE_Settings::getSoundSettings()->audioDevice);
 	TFE_MidiPlayer::init(TFE_Settings::getSoundSettings()->midiOutput, (MidiDeviceType)TFE_Settings::getSoundSettings()->midiType);
 	TFE_Image::init();
 	TFE_Palette::createDefault256();
@@ -660,8 +958,11 @@ int main(int argc, char* argv[])
 	// TFE_Memory::region_test();
 
 	// Color correction.
-	const ColorCorrection colorCorrection = { graphics->brightness, graphics->contrast, graphics->saturation, graphics->gamma };
-	TFE_RenderBackend::setColorCorrection(graphics->colorCorrection, &colorCorrection);
+	const ColorCorrection colorCorrection = { s_mainContext.graphics->brightness, 
+						  s_mainContext.graphics->contrast,
+						  s_mainContext.graphics->saturation,
+						  s_mainContext.graphics->gamma };
+	TFE_RenderBackend::setColorCorrection(s_mainContext.graphics->colorCorrection, &colorCorrection);
 
 	// Optional Reticle.
 	reticle_init();
@@ -676,7 +977,7 @@ int main(int argc, char* argv[])
 	{
 		TFE_FrontEndUI::setAppState(APP_STATE_SET_DEFAULTS);
 	}
-	else if (s_startupGame >= Game_Dark_Forces && validatePath())
+	else if (s_mainContext.startupGame >= Game_Dark_Forces && validatePath())
 	{
 		TFE_FrontEndUI::setAppState(APP_STATE_GAME);
 	}
@@ -686,267 +987,27 @@ int main(int argc, char* argv[])
 	TFE_SaveSystem::setCurrentGame(gameInfo->id);
 
 	// Setup the framelimiter.
-	TFE_System::frameLimiter_set(graphics->frameRateLimit);
+	TFE_System::frameLimiter_set(s_mainContext.graphics->frameRateLimit);
 
 	// Start reading the mods immediately?
 	TFE_FrontEndUI::modLoader_read();
 
 	// Game loop
-	u32 frame = 0u;
-	bool showPerf = false;
-	bool relativeMode = false;
+	s_mainContext.frame = 0u;
+	s_mainContext.showPerf = false;
+	s_mainContext.relativeMode = false;
 	TFE_System::logWrite(LOG_MSG, "Progam Flow", "The Force Engine Game Loop Started");
-	while (s_loop && !TFE_System::quitMessagePosted())
-	{
-		TFE_FRAME_BEGIN();
-		TFE_System::frameLimiter_begin();
-		
-		bool enableRelative = TFE_Input::relativeModeEnabled();
-		if (enableRelative != relativeMode)
-		{
-			relativeMode = enableRelative;
-			SDL_SetRelativeMouseMode(relativeMode ? SDL_TRUE : SDL_FALSE);
-		}
 
-		// System events
-		SDL_Event event;
-		while (SDL_PollEvent(&event)) { handleEvent(event); }
-
-		// Handle mouse state.
-		s32 mouseX, mouseY;
-		s32 mouseAbsX, mouseAbsY;
-		u32 state = SDL_GetRelativeMouseState(&mouseX, &mouseY);
-		SDL_GetMouseState(&mouseAbsX, &mouseAbsY);
-		TFE_Input::setRelativeMousePos(mouseX, mouseY);
-		TFE_Input::setMousePos(mouseAbsX, mouseAbsY);
-		inputMapping_updateInput();
-
-		// Can we save?
-		TFE_FrontEndUI::setCanSave(s_curGame ? s_curGame->canSave() : false);
-
-		// Update the System UI.
-		AppState appState = TFE_FrontEndUI::update();
-		s_loadRequestFilename = TFE_SaveSystem::loadRequestFilename();
-		if (s_loadRequestFilename)
-		{
-			appState = APP_STATE_LOAD;
-		}
-
-		if (appState == APP_STATE_QUIT)
-		{
-			s_loop = false;
-		}
-		else if (appState != s_curState)
-		{
-			if (appState == APP_STATE_EXIT_TO_MENU)	// Return to the menu from the game.
-			{
-				if (s_curGame)
-				{
-					freeGame(s_curGame);
-					s_curGame = nullptr;
-				}
-				s_soundPaused = false;
-				appState = APP_STATE_MENU;
-			}
-
-			char* selectedMod = TFE_FrontEndUI::getSelectedMod();
-			if (selectedMod && selectedMod[0] && appState == APP_STATE_GAME)
-			{
-				char* newArgs[16];
-				for (s32 i = 0; i < argc && i < 15; i++)
-				{
-					newArgs[i] = argv[i];
-				}
-				newArgs[argc] = selectedMod;
-				setAppState(appState, argc + 1, newArgs);
-			}
-			else
-			{
-				setAppState(appState, argc, argv);
-			}
-		}
-
-		if (TFE_A11Y::hasPendingFont()) { TFE_A11Y::loadPendingFont(); } // Can't load new fonts between TFE_Ui::begin() and TFE_Ui::render();
-		TFE_Ui::begin();
-		TFE_System::update();
-
-		// Update
-		if (TFE_FrontEndUI::uiControlsEnabled() && task_canRun())
-		{
-			if (TFE_FrontEndUI::isConsoleOpen() && !TFE_FrontEndUI::isConsoleAnimating() && TFE_Input::keyPressed(KEY_ESCAPE))
-			{
-				TFE_FrontEndUI::toggleConsole();
-				// "Eat" the key so it doesn't extend to the Escape menu.
-				TFE_Input::clearKeyPressed(KEY_ESCAPE);
-				inputMapping_clearKeyBinding(KEY_ESCAPE);
-				if (s_curGame)
-				{
-					s_curGame->pauseGame(false);
-					TFE_Input::enableRelativeMode(true);
-				}
-			}
-			else if (inputMapping_getActionState(IAS_CONSOLE) == STATE_PRESSED)
-			{
-				bool isOpening = TFE_FrontEndUI::toggleConsole();
-				if (s_curGame)
-				{
-					s_curGame->pauseGame(isOpening);
-					TFE_Input::enableRelativeMode(!isOpening);
-				}
-			}
-			else if (TFE_Input::keyPressed(KEY_F9) && TFE_Input::keyDown(KEY_LALT))
-			{
-				showPerf = !showPerf;
-			}
-			else if (TFE_Input::keyPressed(KEY_F10) && TFE_Input::keyDown(KEY_LALT))
-			{
-				TFE_FrontEndUI::toggleProfilerView();
-			}
-
-			bool toggleSystemMenu = systemMenuKeyCombo();
-			if (TFE_FrontEndUI::isConfigMenuOpen() && (toggleSystemMenu || TFE_Input::keyPressed(KEY_ESCAPE)))
-			{
-				// "Eat" the escape key so it doesn't also open the Escape menu.
-				TFE_Input::clearKeyPressed(KEY_ESCAPE);
-				inputMapping_clearKeyBinding(KEY_ESCAPE);
-
-				s_curState = TFE_FrontEndUI::menuReturn();
-
-				if ((s_soundPaused || TFE_Settings::getSoundSettings()->disableSoundInMenus) && s_curGame)
-				{
-					s_curGame->pauseSound(false);
-					s_soundPaused = false;
-				}
-			}
-			else if (toggleSystemMenu)
-			{
-				TFE_FrontEndUI::enableConfigMenu();
-				TFE_FrontEndUI::setMenuReturnState(s_curState);
-
-				if (TFE_Settings::getSoundSettings()->disableSoundInMenus && s_curGame)
-				{
-					s_curGame->pauseSound(true);
-					s_soundPaused = true;
-				}
-			}
-			else if (s_soundPaused && !TFE_FrontEndUI::isConfigMenuOpen())
-			{
-				if (s_curGame)
-				{
-					s_curGame->pauseSound(false);
-				}
-				s_soundPaused = false;
-			}
-		}
-
-		#ifdef ENABLE_FORCE_SCRIPT
-			TFE_ForceScript::update();
-		#endif
-
-		const bool isConsoleOpen = TFE_FrontEndUI::isConsoleOpen();
-		bool endInputFrame = true;
-		if (s_curState == APP_STATE_EDITOR)
-		{
-		#if ENABLE_EDITOR == 1
-			if (TFE_Editor::update(isConsoleOpen))
-			{
-				TFE_FrontEndUI::setAppState(APP_STATE_MENU);
-			}
-		#endif
-		}
-		else if (s_curState == APP_STATE_GAME)
-		{
-			if (!s_curGame)
-			{
-				s_curState = APP_STATE_MENU;
-			}
-			else
-			{
-				TFE_SaveSystem::update();
-				s_curGame->loopGame();
-				endInputFrame = TFE_Jedi::task_run() != 0;
-			}
-		}
-		else
-		{
-			TFE_RenderBackend::clearWindow();
-		}
-
-		bool drawFps = s_curGame && graphics->showFps;
-		if (s_curGame) { drawFps = drawFps && (!s_curGame->isPaused()); }
-
-		TFE_FrontEndUI::setCurrentGame(s_curGame);
-		TFE_FrontEndUI::draw(s_curState == APP_STATE_MENU || s_curState == APP_STATE_NO_GAME_DATA || s_curState == APP_STATE_SET_DEFAULTS,
-			s_curState == APP_STATE_NO_GAME_DATA, s_curState == APP_STATE_SET_DEFAULTS, drawFps);
-
-		// Make sure the clear the no game data state if the data becomes valid.
-		if (TFE_FrontEndUI::isNoDataMessageSet() && validatePath())
-		{
-			TFE_FrontEndUI::clearNoDataState();
-		}
-
-		bool swap = s_curState != APP_STATE_EDITOR && (s_curState != APP_STATE_MENU || TFE_FrontEndUI::isConfigMenuOpen());
-	#if ENABLE_EDITOR == 1
-		if (s_curState == APP_STATE_EDITOR)
-		{
-			swap = TFE_Editor::render();
-		}
-	#endif
-
-		// Blit the frame to the window and draw UI.
-		TFE_RenderBackend::swap(swap);
-
-		// Handle framerate limiter.
-		TFE_System::frameLimiter_end();
-
-		// Clear transitory input state.
-		if (endInputFrame)
-		{
-			TFE_Input::endFrame();
-			inputMapping_endFrame();
-		}
-		frame++;
-
-		if (endInputFrame)
-		{
-			TFE_FRAME_END();
-		}
-	}
-
-	if (s_curGame)
-	{
-		freeGame(s_curGame);
-		s_curGame = nullptr;
-	}
-	s_soundPaused = false;
-	game_destroy();
-	reticle_destroy();
-	inputMapping_shutdown();
-
-	// Cleanup
-	TFE_FrontEndUI::shutdown();
-	TFE_Audio::shutdown();
-	TFE_MidiPlayer::destroy();
-	TFE_Image::shutdown();
-	TFE_Palette::freeAll();
-	TFE_RenderBackend::updateSettings();
-	TFE_Settings::shutdown();
-	TFE_Jedi::texturepacker_freeGlobal();
-	TFE_RenderBackend::destroy();
-	TFE_SaveSystem::destroy();
-	SDL_Quit();
-
-	#ifdef ENABLE_FORCE_SCRIPT
-	TFE_ForceScript::destroy();
-	#endif
-		
-	TFE_System::logWrite(LOG_MSG, "Progam Flow", "The Force Engine Game Loop Ended.");
-	TFE_System::logClose();
-	TFE_System::freeMessages();
+#ifdef __EMSCRIPTEN__
+	emscripten_set_main_loop(mainloop, 0, 1);
+#else
+	while (1) { mainloop(); }
+#endif
+	// Do not put anything after here, it won't be called.
 	return PROGRAM_SUCCESS;
 }
 
-void parseOption(const char* name, const std::vector<const char*>& values, bool longName)
+static void parseOption(const char* name, const std::vector<const char*>& values, bool longName)
 {
 	if (!longName)	// short names use the same style as the originals.
 	{
@@ -957,13 +1018,13 @@ void parseOption(const char* name, const std::vector<const char*>& values, bool 
 			TFE_System::logWrite(LOG_MSG, "CommandLine", "Game to load: %s", gameToLoad);
 			if (!strcasecmp(gameToLoad, "dark"))
 			{
-				s_startupGame = Game_Dark_Forces;
+				s_mainContext.startupGame = Game_Dark_Forces;
 			}
 		}
 		else if (strcasecmp(name, "nosound") == 0)
 		{
 			// -noaudio
-			s_nullAudioDevice = true;
+			s_mainContext.nullAudioDevice = true;
 		}
 		else if (strcasecmp(name, "fullscreen") == 0)
 		{
@@ -983,13 +1044,13 @@ void parseOption(const char* name, const std::vector<const char*>& values, bool 
 			TFE_System::logWrite(LOG_MSG, "CommandLine", "Game to load: %s", gameToLoad);
 			if (!strcasecmp(gameToLoad, "dark"))
 			{
-				s_startupGame = Game_Dark_Forces;
+				s_mainContext.startupGame = Game_Dark_Forces;
 			}
 		}
 		else if (strcasecmp(name, "nosound") == 0)
 		{
 			// --noaudio
-			s_nullAudioDevice = true;
+			s_mainContext.nullAudioDevice = true;
 		}
 		else if (strcasecmp(name, "fullscreen") == 0)
 		{
