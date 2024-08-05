@@ -53,7 +53,7 @@ namespace TFE_Paths
 			fprintf(stderr, "[Error] %s\n", "$HOME is undefined! Defaulting to /tmp");
 			home = strdup("/tmp");
 		}
-
+#ifndef __EMSCRIPTEN__
 		if (!tdh || strlen(tdh) < 1) {
 			snprintf(path, TFE_MAX_PATH, "%s/.local/share/%s/", home, tfe);
 		} else {
@@ -74,6 +74,7 @@ namespace TFE_Paths
 				snprintf(path, TFE_MAX_PATH, "%s/%s/", cwd, tdh);
 			}
 		}
+#endif
 		s_paths[pathid] = path;
 		FileUtil::makeDirectory(path);
 	}
@@ -91,10 +92,13 @@ namespace TFE_Paths
 	bool setProgramDataPath(const char *append)
 	{
 		s_systemPaths.push_back(getPath(PATH_PROGRAM));
+#ifndef __EMSCRIPTEN__
 		if (isPortableInstall())
 		{
+#endif
 			s_paths[PATH_PROGRAM_DATA] = s_paths[PATH_PROGRAM];
 			return true;
+#ifndef __EMSCRIPTEN__
 		}
 
 		std::string s;
@@ -106,14 +110,18 @@ namespace TFE_Paths
 		s_systemPaths.push_back(getPath(PATH_PROGRAM_DATA));
 
 		return true;
+#endif
 	}
 
 	bool setUserDocumentsPath(const char *append)
 	{
+#ifndef __EMSCRIPTEN__
 		if (isPortableInstall())
 		{
+#endif
 			s_paths[PATH_USER_DOCUMENTS] = s_paths[PATH_PROGRAM];
 			return true;
+#ifndef __EMSCRIPTEN__
 		}
 
 		// ensure SetProgramDataPath() was called before
@@ -128,6 +136,7 @@ namespace TFE_Paths
 		// from.
 		FileUtil::setCurrentDirectory(s_paths[PATH_USER_DOCUMENTS].c_str());
 		return true;
+#endif
 	}
 
 	bool setProgramPath(void)

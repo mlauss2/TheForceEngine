@@ -64,6 +64,8 @@ namespace OpenGL_Caps
 			m_maxAnisotropy = 0.0f;
 		}
 
+		printf("caps: %08lx %f\n", m_supportFlags, m_maxAnisotropy);
+
 		// clear any pending errors.
 		(void)glGetError();
 
@@ -81,6 +83,9 @@ namespace OpenGL_Caps
 		{
 			m_deviceTier = DEV_TIER_1;
 		}
+#ifdef __EMSCRIPTEN__
+		m_deviceTier = 2;
+#endif
 	}
 
 	bool supportsPbo()

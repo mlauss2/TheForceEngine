@@ -134,7 +134,9 @@ namespace TFE_Settings
 		}
 
 		firstRun = true;
+#ifndef __EMSCRIPTEN__
 		autodetectGamePaths();
+#endif
 		return writeToDisk();
 	}
 

@@ -56,6 +56,8 @@ namespace TFE_System
 		//Write to the debugger or terminal output.
 		#ifdef _WIN32
 			OutputDebugStringA(s_workStr);
+		#elif defined (__EMSCRIPTEN__)
+			printf("%s", s_workStr);
 		#else
 			fprintf(stderr, "%s", s_workStr);
 		#endif

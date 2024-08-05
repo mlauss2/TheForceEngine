@@ -46,6 +46,8 @@ bool FileStream::open(const char *filename, AccessMode mode)
 	char fn[TFE_MAX_PATH];
 	char *fn2;
 
+	printf("FileStream::open(%s)\n", filename);
+
 	if (!filename || 1 > strlen(filename))
 		return false;
 
@@ -60,6 +62,7 @@ bool FileStream::open(const char *filename, AccessMode mode)
 	// a matching filename with different case in the
 	// given directory.
 	m_file = fopen(fn, modeStrings[mode]);
+	printf("FileStream::open(%s): fopen(%s) = %08lx\n", filename, fn, m_file);
 	if ((m_file == NULL) && (errno == ENOENT)) {
 		// ok, try harder to find a filename with different case
 		fn2 = FileUtil::findFileNoCase(filename);

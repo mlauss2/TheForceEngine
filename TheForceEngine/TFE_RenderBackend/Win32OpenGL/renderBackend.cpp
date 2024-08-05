@@ -127,8 +127,11 @@ namespace TFE_RenderBackend
 			TFE_System::logWrite(LOG_ERROR, "RenderBackend", "SDL_GL_CreateContext() failed: %s", SDL_GetError());
 			return nullptr;
 		}
-
+#ifdef __EMSCRIPTEN__
+		int glver = gladLoadGLES2((GLADloadfunc)SDL_GL_GetProcAddress);
+#else
 		int glver = gladLoadGL((GLADloadfunc)SDL_GL_GetProcAddress);
+#endif
 		if (glver == 0)
 		{
 			TFE_System::logWrite(LOG_ERROR, "RenderBackend", "cannot initialize GLAD");

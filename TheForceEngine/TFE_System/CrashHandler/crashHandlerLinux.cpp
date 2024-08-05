@@ -1,3 +1,4 @@
+#ifndef __EMSCRIPTEN__
 #include <cstring>
 #include <errno.h>
 #include <execinfo.h>
@@ -97,11 +98,13 @@ static void setsig(int signo)
 		fprintf(stderr, "Crash Handler: setsig(%d) failed with %d (%s)\n", signo, errno, strerror(errno));
 	}
 }
+#endif
 
 namespace TFE_CrashHandler
 {
 	void setProcessExceptionHandlers()
 	{
+#ifndef __EMSCRIPTEN__		
 		// skip signal hooking when running under debuggers.
 		if (are_we_being_debugged())
 			return;
@@ -113,6 +116,7 @@ namespace TFE_CrashHandler
 		setsig(SIGBUS);		// alignment issues
 		setsig(SIGSEGV);	// pointer gone awry
 		setsig(SIGABRT);	// abort() was invoked
+#endif
 	}
 
 	void setThreadExceptionHandlers()
